@@ -1,0 +1,28 @@
+name: Build LaTeX PDF
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build_latex:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Install LaTeX
+      run: sudo apt-get update && sudo apt-get install -y texlive-full
+
+    - name: Compile main.tex
+      run: |
+        mkdir -p docs
+        pdflatex -output-directory=docs main.tex
+        pdflatex -output-directory=docs main.tex  # run twice for references
+
+    - name: Upload artifact (optional)
+      uses: actions/upload-artifact@v3
+      with:
+        name: compiled-pdf
+        path: docs/main.pdf
