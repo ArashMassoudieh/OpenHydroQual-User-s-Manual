@@ -1,0 +1,1455 @@
+
+\documentclass[12pt]{report}
+\usepackage{amsmath}
+\usepackage{bm}
+\usepackage{url}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{placeins}
+\usepackage{geometry}
+
+ \geometry{
+ a4paper,
+ left=30mm,
+ top=30mm,
+ }
+
+\usepackage{cite}
+\usepackage{natbib}
+\bibliographystyle{plainnat}
+
+\title{OpenHydroQual: Theory and Equations Manual}
+\author{
+Arash Massoudieh\thanks{EnviroInformatics, LLC} \and 
+Behzad Shakouri\thanks{The Catholic University of America}
+}
+\date{April 2025}
+\renewcommand{\theequation}{\arabic{chapter}.\arabic{equation}}
+\begin{document}
+
+\maketitle
+
+\section*{Executive Summary}
+
+\addcontentsline{toc}{section}{Executive Summary}
+
+This document provides the theoretical foundation and governing equations used in the OpenHydroQual modeling platform. OpenHydroQual is a modular, process-based simulation framework designed for integrated hydrologic and water quality modeling.
+
+The manual focuses on the mathematical formulations underlying each process block and connector within the system, including soil water dynamics, evapotranspiration, and variably saturated flow based on the Van Genuchten-Mualem approach. Each component is described using physically-based equations with clearly defined variables, units, and assumptions.
+
+This documentation is intended for model developers, researchers, and advanced users seeking to understand or extend the internal mechanics of OpenHydroQual. As the platform continues to evolve, additional chapters will be added to cover the full suite of hydrological, hydraulic, and biogeochemical modules.
+
+
+\tableofcontents
+
+\chapter{Core Model Components and Default Configuration}
+
+This chapter describes the core components that are automatically loaded when OpenHydroQual starts. These components are part of the base configuration and provide essential structures for water storage, flow, and basic mass transport. They serve as the foundation upon which more specialized plugins are integrated.
+
+\section{Catchment Block}
+
+The \texttt{Catchment} block represents a surface hydrologic unit where precipitation accumulates and may contribute to runoff, infiltration, and evapotranspiration. Its internal storage is governed by mass balance:
+\begin{equation}
+\frac{d S}{d t} = \text{Inflow} + P - ET - \text{Loss}
+\end{equation}
+where:
+\begin{itemize}
+  \item $S$: is the total storage of overland flow on the catchment, 
+  \item $P$: precipitation flux (from precipitation source),
+  \item $ET$: evapotranspiration flux (from evapotranspiration source),
+  \item $\text{Loss}$: user-defined loss rate proportional to current storage,
+  \item $\text{Inflow}$: optional inflow from upstream components.
+\end{itemize}
+
+The volume-to-depth conversion is governed by:
+\begin{equation}
+\text{d} = \frac{S}{A}
+\end{equation}
+
+Flow out of the catchment can be computed using a Manning-like approximation:
+\begin{equation}
+Q = 86400 \cdot \left(\frac{W}{n}\right) S^{1/2} (\max(\text{depth} - d_{ds}, 0))^{5/3}
+\end{equation}
+where:
+\begin{itemize}
+  \item $A$: catchment area, 
+  \item $W$: catchment width,
+  \item $n$: Manning’s coefficient,
+  \item $S$: slope,
+  \item $d_{ds}$: depression storage.
+\end{itemize}
+
+\section{Fixed Head Boundary Blocks}
+
+OpenHydroQual supports two types of fixed head boundaries:
+\begin{itemize}
+  \item \texttt{fixed\_head}: a boundary with constant head,
+  \item \texttt{time\_variable\_fixed\_head}: a boundary with time-series defined head.
+\end{itemize}
+
+Both block types hold a very large default storage to behave like infinite reservoirs, and participate in mass and flow balance with surrounding blocks.
+
+\section{Constituent Representation}
+
+Each chemical or particulate species in OpenHydroQual is modeled as a \texttt{Constituent} or \texttt{Particle} object. These have mass balance over storage:
+\begin{equation}
+\frac{d m}{d t} = \text{advective} + \text{diffusive} + \text{external input} + \text{reaction}
+\end{equation}
+
+The concentration is calculated as:
+\begin{equation}
+C = \frac{m}{S}
+\end{equation}
+
+Each constituent includes expressions for:
+\begin{itemize}
+  \item advective transport: $q C$ using upstream weighting,
+  \item diffusive/dispersive transport: based on Fickian assumptions,
+  \item inflow loading via time-series or source concentration,
+  \item optional settling (for \texttt{Particle}) using gravitational terms.
+\end{itemize}
+
+\section{Reactions}
+
+OpenHydroQual defines \texttt{Reaction} object that apply rate expressions controlling the loss or gain of constituents. Reactions are normalized by storage:
+\begin{equation}
+R = r(C, T, ...)
+\end{equation}
+where $R$ is the net reaction rate [mass/time], and $r$ is an expression dependent on constituent concentrations, temperature, and global or local reaction parameters.
+
+\subsection{Temperature Correction}
+
+Reactions can be adjusted using Arrhenius-style correction with global or block-level time-series temperatures:
+\begin{equation}
+\text{rate} = k \cdot \text{Arrhenius}^{(T - T_0)}
+\end{equation}
+
+\subsection{Reaction Parameters}
+
+\texttt{ReactionParameter} objects store constants or time-variable values, which can be referenced in rate expressions. These can be global (shared) or block-specific.
+
+\section{Objective Functions and Observations}
+
+The \texttt{Objective\_Function} blocks define metrics for model evaluation, including integrals, values, maxima, or statistical exceedances. These expressions operate on outputs of blocks or links.
+
+\texttt{Observation} blocks define observed time-series data, the variable being observed, and the method of comparison (least squares, similarity, etc.). Observations can also define error structures and be used in calibration.
+
+This set of components provides the foundational hydrologic, chemical, and model evaluation infrastructure upon which OpenHydroQual builds more complex plugin modules.
+
+
+\chapter{Evapotranspiration Models for Soil}
+
+OpenHydroQual implements four evapotranspiration models for simulating soil evaporation. All models estimate a potential depth rate of evapotranspiration (in m/day), denoted as \( ET_{\text{raw}} \), and then scale it by a moisture-limiting factor and surface area to compute the volumetric evapotranspiration rate \( Q_{ET} \) [m³/day]:
+
+\begin{equation}
+Q_{ET} = A \cdot \max\left(\frac{\theta}{\theta_{\text{sat}}}, 0\right) \cdot c \cdot ET_{\text{raw}}
+\end{equation}
+
+where:
+\begin{itemize}
+  \item \( A \): surface area of the soil element [m²],
+  \item \( \theta \): current volumetric soil moisture [m³/m³],
+  \item \( \theta_{\text{sat}} \): saturated soil moisture [m³/m³],
+  \item \( c \): user-defined correction factor (unitless),
+  \item \( ET_{\text{raw}} \): computed evapotranspiration depth [m/day],
+  \item \( Q_{ET} \): evapotranspiration volume flux [m³/day].
+\end{itemize}
+
+\section{Aerodynamic Model}
+
+\begin{align}
+B &= 0.000102 \cdot \frac{u}{\left[\ln\left(\frac{z_2}{z_0}\right)\right]^2} \\
+e_{as} &= 611 \cdot \exp\left(\frac{17.27 \cdot T}{237.3 + T}\right) \\
+ET_{\text{raw}} &= B \cdot e_{as} \cdot (R_h - 1)
+\end{align}
+
+\textbf{Definitions:}
+\begin{itemize}
+  \item \( u \): wind speed at height \( z_2 \) [m/s],
+  \item \( z_2 \): wind measurement height [m],
+  \item \( z_0 \): surface roughness height [m],
+  \item \( T \): air temperature [°C],
+  \item \( R_h \): relative humidity (0–1),
+  \item \( e_{as} \): saturation vapor pressure [Pa],
+  \item \( B \): aerodynamic transfer coefficient [s/m].
+\end{itemize}
+
+\section{Time-Series Model}
+
+\begin{equation}
+ET_{\text{raw}} = ET_{\text{input}}
+\end{equation}
+
+\textbf{Definitions:}
+\begin{itemize}
+  \item \( ET_{\text{input}} \): user-provided time series of evapotranspiration rate [m/day].
+\end{itemize}
+
+\section{Energy Balance Model}
+
+\begin{align}
+\lambda &= 2501000 - 2370 \cdot T \\
+ET_{\text{raw}} &= -c \cdot \frac{R_s}{\lambda \cdot 1000} \cdot 86400
+\end{align}
+
+\textbf{Definitions:}
+\begin{itemize}
+  \item \( R_s \): solar radiation [W/m²],
+  \item \( \lambda \): latent heat of vaporization [J/kg],
+  \item \( T \): air temperature [°C].
+\end{itemize}
+
+\section{Penman Model}
+
+\begin{align}
+\lambda &= 2501000 - 2370 \cdot T \\
+B &= 0.000102 \cdot \frac{u \cdot w}{\left[\ln\left(\frac{z_2}{z_0}\right)\right]^2} \\
+e_{as} &= 611 \cdot \exp\left(\frac{17.27 \cdot T}{237.3 + T}\right) \\
+\Delta &= \frac{4098 \cdot e_{as}}{(237.3 + T)^2} \\
+E_a &= B \cdot e_{as} \cdot (R_h - 1) \\
+E_r &= -s \cdot \frac{R_s}{\lambda \cdot 1000} \cdot 86400 \\
+ET_{\text{raw}} &= \frac{\Delta \cdot E_r + \gamma \cdot E_a}{\Delta + \gamma}
+\end{align}
+
+\textbf{Definitions:}
+\begin{itemize}
+  \item \( \gamma \): psychrometric constant [Pa/°C],
+  \item \( \Delta \): slope of vapor pressure curve [Pa/°C],
+  \item \( w \): wind scaling factor (unitless),
+  \item \( s \): solar scaling factor (unitless),
+  \item \( E_a \): aerodynamic component [m/day],
+  \item \( E_r \): radiation component [m/day].
+\end{itemize}
+
+\chapter{Variably Saturated Soil Model}
+
+The OpenHydroQual unsaturated soil block represents a vertically homogeneous, variably saturated soil layer with dynamic moisture storage, evapotranspiration, and vertical/horizontal water exchange. The soil water state is represented through a Van Genuchten-Mualem formulation. The following equations and parameters govern its behavior.
+
+\subsection{Soil Water Storage}
+
+The total water stored in the soil block is:
+\begin{equation}
+S = A \cdot d \cdot \theta
+\end{equation}
+where:
+\begin{itemize}
+\item $S$: Soil water storage [m$^3$],
+\item $A$: Surface area of the soil block [m$^2$],
+\item $d$: Soil depth [m],
+\item $\theta$: Volumetric water content [m$^3$/m$^3$].
+\end{itemize}
+
+\section{Moisture Content and Effective Saturation}
+
+\begin{align}
+\theta &= \frac{S}{A \cdot d} \\
+S_e &= \min\left(\max\left(\frac{\theta - \theta_r}{\theta_s - \theta_r}, 0.001\right), 0.999\right)
+\end{align}
+where:
+\begin{itemize}
+\item $\theta_r$: Residual moisture content [m$^3$/m$^3$],
+\item $\theta_s$: Saturated moisture content [m$^3$/m$^3$],
+\item $S_e$: Effective saturation [-].
+\end{itemize}
+
+\section{Pressure Head and Hydraulic Head}
+
+\begin{align}
+m &= 1 - \frac{1}{n} \\
+\psi &= -\min\left(\frac{1}{\alpha} \left( S_e^{-1/m} - 1 \right)^{1/n}, 10000\right) + \theta_s \cdot \frac{\max\left(S_e - 0.999, 0\right)}{S_s} \\
+h &= d + z_b + \psi
+\end{align}
+where:
+\begin{itemize}
+\item $\alpha$: Van Genuchten parameter [1/m],
+\item $n$: Van Genuchten parameter [-],
+\item $m$: Related Van Genuchten parameter [-],
+\item $\psi$: Pressure head [m],
+\item $S_s$: Specific storage [1/m],
+\item $z_b$: Bottom elevation of the soil block [m],
+\item $h$: Total hydraulic head [m].
+\end{itemize}
+
+\section{Saturated Hydraulic Conductivity}
+
+\begin{equation}
+K_{sat} = K_{sat}^{(0)} \cdot f_K
+\end{equation}
+where:
+\begin{itemize}
+\item $K_{sat}^{(0)}$: Base saturated hydraulic conductivity [m/day],
+\item $f_K$: User-defined scale factor [-],
+\item $K_{sat}$: Scaled saturated hydraulic conductivity [m/day].
+\end{itemize}
+
+\section{Effective Hydraulic Conductivity (Link Flow)}
+
+For inter-block and external links:
+\begin{equation}
+K_{eff} = K_{sat} \cdot S_e^L \cdot \left[1 - \left(1 - S_e^{1/m}\right)^m \right]^2
+\end{equation}
+where:
+\begin{itemize}
+\item $L$: Van Genuchten-Mualem pore tortuosity parameter [-],
+\item $K_{eff}$: Effective conductivity [m/day].
+\end{itemize}
+
+\section{Darcy Flow Between Soil Blocks}
+
+Vertical or horizontal flow between blocks is computed via Darcy's law:
+\begin{equation}
+q = \frac{(h_s - h_e)}{L} \cdot K_{eff}, \qquad Q = q \cdot A_{int}
+\end{equation}
+where:
+\begin{itemize}
+\item $h_s, h_e$: Hydraulic heads in source and destination blocks [m],
+\item $L$: Distance between block centers [m],
+\item $A_{int}$: Interface area between blocks [m$^2$],
+\item $q$: Darcy flux [m/day],
+\item $Q$: Volumetric flow rate [m$^3$/day].
+\end{itemize}
+
+\section{Electrical Conductivity of Soil Water}
+
+\begin{equation}
+EC = \alpha_{EC} \cdot \max(\theta - \theta_t, 0)^{\beta_{EC}}
+\end{equation}
+where:
+\begin{itemize}
+\item $\alpha_{EC}$: Empirical coefficient,
+\item $\beta_{EC}$: Exponent parameter,
+\item $\theta_t$: Moisture threshold below which conductivity is zero,
+\item $EC$: Electrical conductivity [arbitrary units].
+\end{itemize}
+
+\chapter{Open Channel Flow Models}
+
+OpenHydroQual includes modules for simulating open channel flow in both natural and engineered systems using a storage-based approach and Manning's equation for steady, gradually varied flow. Two main geometries are supported: trapezoidal channel segments and circular (sewer) channels.
+
+\section{Trapezoidal Channel Segment}
+
+A trapezoidal channel is defined by its base width $b$, side slope $z$ (horizontal to vertical), length $L$, and hydraulic properties. The cross-sectional area $A$ and wetted perimeter $P$ are calculated from the water depth $h$:
+
+\begin{align}
+A &= (b + z h) h \\
+P &= b + 2 \sqrt{1 + z^2} h
+\end{align}
+
+The hydraulic radius $R_h$ is:
+\begin{equation}
+R_h = \frac{A}{P}
+\end{equation}
+
+The flow between two connected trapezoidal segments is given by Manning’s equation:
+\begin{equation}
+Q = \frac{1}{n} A R_h^{2/3} \sqrt{\frac{\Delta H}{L}} \cdot 86400
+\end{equation}
+where:
+\begin{itemize}
+\item $n$: Manning’s roughness coefficient [s/m$^{1/3}$],
+\item $\Delta H$: Difference in hydraulic head [m],
+\item $L$: Link length between segments [m],
+\item $86400$: Conversion from seconds to days.
+\end{itemize}
+
+\section{Sewer Channel Segment}
+
+Sewer segments are modeled as partially filled circular conduits. The flow area $A$ and wetted perimeter $P$ are approximated as polynomial functions of the normalized depth $\eta = h/D$, where $D$ is the diameter:
+
+\begin{align}
+A &= D^2 \left[ -0.9103 \eta^3 + 1.3760 \eta^2 + 0.3197 \eta \right] \\
+P &= D \left[ 5.4866 \eta^3 - 8.6020 \eta^2 + 6.1082 \eta \right]
+\end{align}
+
+The hydraulic radius and Manning’s equation are applied similarly:
+
+\begin{align}
+R_h &= \frac{A}{P} \\
+Q &= \frac{1}{n} A R_h^{2/3} \sqrt{\frac{\Delta H}{L}} \cdot 86400
+\end{align}
+
+\section{Withdrawals from Channels}
+
+Agricultural and non-agricultural withdrawals are modeled as depth-dependent fluxes:
+
+\begin{equation}
+W = -A_{use} \cdot R_{use} \cdot \frac{h}{h + 0.05}
+\end{equation}
+where:
+\begin{itemize}
+\item $A_{use}$: Land area withdrawing from the channel [m$^2$],
+\item $R_{use}$: Withdrawal rate per unit area [m/day],
+\item $h$: Water depth [m].
+\end{itemize}
+
+This ensures withdrawals taper off as the channel dries.
+
+\chapter{Pressurized Pipe Networks and Tanks}
+
+OpenHydroQual supports the simulation of pressurized pipe systems, storage tanks, pumps, valves, and user nodes commonly found in water distribution and conveyance networks. The components in this framework are governed by empirical relationships such as the Hazen-Williams and head-discharge curves, and they are connected via mass balance logic.
+
+\section{Storage Tanks}
+Storage tanks are modeled as well-mixed volumes where the water level is computed based on the total volume stored and the tank's base area.
+
+\begin{align}
+d &= \frac{S}{A} \\
+h &= d + z_b
+\end{align}
+
+Where:
+\begin{itemize}
+\item $S$: Storage volume [m$^3$],
+\item $A$: Base area of the tank [m$^2$],
+\item $z_b$: Bottom elevation of the tank [m],
+\item $h$: Hydraulic head at the tank surface [m].
+\end{itemize}
+
+\section{Pipes}
+Pipes can be modeled as one-way or two-way links using the Hazen-Williams equation. The volumetric flow rate $Q$ through a pipe is calculated using:
+
+\begin{equation}
+Q = 24055.44 \cdot C \cdot D^{2.63} \cdot \text{sign}(\Delta H) \cdot \max\left(\left|\frac{\Delta H}{L}\right|, 0.00001\right)^{0.54}
+\end{equation}
+
+Where:
+\begin{itemize}
+\item $C$: Hazen-Williams roughness coefficient,
+\item $D$: Pipe diameter [m],
+\item $\Delta H$: Head difference between upstream and downstream [m],
+\item $L$: Pipe length [m].
+\end{itemize}
+
+For one-way pipes, the flow is set to zero if the head difference is negative.
+
+\section{Valves}
+Valves restrict flow based on a head loss and a user-specified resistance factor $K$. The flow through a valve is:
+
+\begin{equation}
+Q = 300575 \cdot \sqrt{\frac{-\Delta H}{K}} \cdot D^2 \cdot (1 - \text{Closed})
+\end{equation}
+
+Where:
+\begin{itemize}
+\item $\Delta H$: Head difference across the valve,
+\item $K$: Head loss coefficient,
+\item $D$: Valve diameter,
+\item Closed: Binary (0 or 1) indicating whether the valve is shut.
+\end{itemize}
+
+\section{Pumps}
+Pumps are defined using a quadratic head-discharge relationship:
+
+\begin{equation}
+Q = \left(\frac{\max(H_0 + H_s - H_e, 0)}{\alpha}\right)^{1/\beta}
+\end{equation}
+
+\begin{equation}
+P = \frac{9810}{86400} \cdot (H_s - H_e + H_0) \cdot Q
+\end{equation}
+
+Where:
+\begin{itemize}
+\item $H_0$: Pump shutoff head [m],
+\item $H_s, H_e$: Source and endpoint hydraulic heads [m],
+\item $\alpha, \beta$: Pump curve parameters,
+\item $Q$: Flow rate [m$^3$/day],
+\item $P$: Pump power [Watts].
+\end{itemize}
+
+A time-series controlled pump can scale $Q$ by a time-varying coefficient.
+
+\section{Junctions}
+Junctions serve as connection points for multiple pipes. They may be rigid (fixed elevation) or elastic (head varies with storage). Elastic junctions are modeled with:
+
+\begin{equation}
+H = z + \varepsilon \cdot S - \delta
+\end{equation}
+
+Where:
+\begin{itemize}
+\item $z$: Base elevation,
+\item $\varepsilon$: Elasticity coefficient,
+\item $S$: Storage at the node,
+\item $\delta$: Adjustment parameter.
+\end{itemize}
+
+\section{End-Users}
+End-users are demand blocks that withdraw water based on a constant or time-series withdrawal rate. The net withdrawal is modeled as:
+
+\begin{equation}
+Q_{use} = \textrm{constant rate} + \textrm{time series rate}
+\end{equation}
+
+The water withdrawn by the user is pulled from the upstream node through a connector link.
+
+\bigskip
+This framework allows modeling a variety of infrastructure setups including distribution networks, pumping stations, reservoirs, and household demand zones, and it integrates seamlessly with surface and groundwater domains in OpenHydroQual.
+
+\chapter{Chemical Sources and Reactions}
+
+This chapter describes the implementation of chemical sources, reactors, and associated constituents and transformations in OpenHydroQual. These components represent mass fluxes due to external inputs, internal processes such as volatilization, and reactions such as desorption or decay.
+
+\section{External Sources}
+
+\subsection*{Time-Series Chemical Source}
+A time-variable chemical loading is implemented using a user-supplied time series:
+\begin{equation}
+R_{\text{source}}(t) = q_{\text{load}}(t)
+\end{equation}
+where:
+\begin{itemize}
+  \item $R_{\text{source}}(t)$ is the mass input rate (g/day) at time $t$
+  \item $q_{\text{load}}(t)$ is the user-defined time series of chemical mass loading
+\end{itemize}
+
+\subsection*{Constant Source per Volume}
+Uniform loading across the entire water body volume is defined as:
+\begin{equation}
+R_{\text{const}} = C_r V
+\end{equation}
+where:
+\begin{itemize}
+  \item $R_{\text{const}}$ is the total mass loading rate (g/day)
+  \item $C_r$ is the source rate per unit volume (g/day/m$^3$)
+  \item $V$ is the storage volume (m$^3$)
+\end{itemize}
+
+\subsection*{Atmospheric Exchange}
+
+\paragraph{Volumetric-based Exchange}
+Mass transfer with the atmosphere using a first-order approach:
+\begin{equation}
+R_{\text{atm}} = k_a V (C_{\text{sat}} - C)
+\end{equation}
+where:
+\begin{itemize}
+  \item $R_{\text{atm}}$ is the net atmospheric flux (g/day)
+  \item $k_a$ is the rate coefficient (1/day)
+  \item $C_{\text{sat}}$ is the saturation concentration (g/m$^3$)
+  \item $C$ is the actual aqueous concentration (g/m$^3$)
+\end{itemize}
+
+\paragraph{Surface-based Exchange}
+Surface-dependent atmospheric exchange follows:
+\begin{equation}
+R_{\text{surf}} = k_s A (C_{\text{sat}} - C)
+\end{equation}
+where:
+\begin{itemize}
+  \item $k_s$ is the surface exchange coefficient (m/day)
+  \item $A$ is the water surface area (m$^2$)
+\end{itemize}
+
+\section{Reactors and Flow Structures}
+
+Reactors receive flow from external or internal links and accumulate mass. Flow can be constant or defined via time series:
+\begin{equation}
+Q_{\text{in}} = Q_{\text{const}} + Q_{\text{var}}(t)
+\end{equation}
+
+\section{Constituent Mass Balance}
+
+Each constituent is modeled with a mass balance equation:
+\begin{equation}
+\frac{dM}{dt} = \sum R_{\text{in}} - \sum R_{\text{out}} + \sum R_{\text{reaction}}
+\end{equation}
+
+Concentration is computed as:
+\begin{equation}
+C = \frac{M}{V}
+\end{equation}
+
+\section{Mass Transfer: Advection and Diffusion}
+
+For each link:
+\begin{align}
+R_{\text{adv}} &= \text{upstream}(Q, C) \\
+R_{\text{diff}} &= D \frac{A}{L}(C_s - C_e)
+\end{align}
+where:
+\begin{itemize}
+  \item $Q$ is flow (m$^3$/day)
+  \item $D$ is the diffusion coefficient (m$^2$/day)
+  \item $A$ is the cross-sectional area (m$^2$)
+  \item $L$ is link length (m)
+  \item $C_s$, $C_e$ are concentrations at start and end nodes
+\end{itemize}
+
+\section{Reactions}
+
+\subsection*{Desorption}
+Reversible transformation of sorbed to mobile phase:
+\begin{equation}
+R_{\text{desorp}} = k_d (C_{\text{sorbed}} - C_{\text{eq}})
+\end{equation}
+
+\section{Age Tracer and Decay}
+
+Age tracking uses a decay-modified advective transfer:
+\begin{equation}
+L = Q e^{-\lambda C_{\text{up}}}
+\end{equation}
+where $\lambda$ is the decay parameter (1/day).
+
+\chapter{Groundwater Plugin}
+
+The Groundwater plugin in OpenHydroQual simulates flow and storage dynamics within groundwater systems. It provides a physically based representation of groundwater cells and linkages to other hydrological components such as fixed-head boundaries, surface water, soil zones, and lakes. The equations are governed by Darcy's Law and groundwater storage relationships.
+
+\section{Groundwater Cell}
+
+Each \textbf{Groundwater cell} represents a storage volume in the subsurface. Storage is initialized using:
+\begin{equation}
+S = A \cdot d \cdot \theta
+\end{equation}
+where:
+\begin{itemize}
+  \item $A$ is the cell area [m$^2$],
+  \item $d$ is the depth of the cell [m],
+  \item $\theta$ is the volumetric moisture content [-].
+\end{itemize}
+
+Hydraulic head in the cell is computed from:
+\begin{equation}
+H = d + z_b + \frac{\theta - \phi}{S_s}
+\end{equation}
+where:
+\begin{itemize}
+  \item $H$ is the hydraulic head [m],
+  \item $z_b$ is the bottom elevation of the cell [m],
+  \item $\phi$ is porosity [-],
+  \item $S_s$ is specific storage [1/m].
+\end{itemize}
+
+\section{Groundwater Link}
+
+The \textbf{Groundwater link} connects two groundwater cells. The flow between the cells is calculated by:
+\begin{equation}
+Q = \frac{1}{2} A_c (K_{s} + K_{e}) \cdot \frac{H_s - H_e}{L}
+\end{equation}
+where:
+\begin{itemize}
+  \item $Q$ is the flow rate [m$^3$/day],
+  \item $A_c$ is the interface area between the two cells [m$^2$],
+  \item $K_s$, $K_e$ are the hydraulic conductivities of the source and receiving cells [m/day],
+  \item $H_s$, $H_e$ are the heads in the source and receiving cells [m],
+  \item $L$ is the distance between cell centers [m].
+\end{itemize}
+
+\section{Groundwater to Fixed Head}
+
+The \textbf{Groundwater to fixed head} component represents flow from a groundwater cell to a fixed-head boundary condition, such as a well or river with constant head:
+\begin{equation}
+Q = A_c \cdot K \cdot \frac{H_s - H_e}{L}
+\end{equation}
+
+\section{Groundwater to Stream}
+
+The \textbf{Groundwater to stream} component simulates exchange with surface water:
+\begin{equation}
+Q = A_c \cdot K \cdot \frac{H_s - H_e}{L}
+\end{equation}
+
+\section{Soil to Groundwater Link}
+
+The \textbf{Soil to groundwater link} allows vertical water movement from the vadose zone to the aquifer:
+\begin{equation}
+L = \frac{d_s + d_e}{2}
+\end{equation}
+\begin{equation}
+Q = A_c \cdot K \cdot \frac{H_s - H_e}{L}
+\end{equation}
+
+\section{Surface Water to Groundwater Link}
+
+The \textbf{Surface water to groundwater link} enables interactions between ponds/lakes and the aquifer:
+\begin{equation}
+Q = A_c \cdot K \cdot \frac{H_s - H_e}{L}
+\end{equation}
+
+\section{Lake to Groundwater Link}
+
+The \textbf{Lake to groundwater link} allows groundwater exchange with a lake volume:
+\begin{equation}
+Q = A_c \cdot K \cdot \frac{H_s - H_e}{L}
+\end{equation}
+
+These equations enable a modular representation of subsurface flows and interactions across components within OpenHydroQual.
+
+\chapter{Stormwater Pond and Drainage Structures}
+
+This chapter describes the stormwater pond unit and its associated hydraulic structures, including rating-curve-based weirs, drain pipes, orifices, and horizontal and vertical subsurface links. These components allow modeling of pond dynamics, outflows, and interactions with other hydrologic blocks.
+
+\section{Stormwater Pond}
+
+The \textbf{Stormwater Pond} block represents a detention or retention pond that stores incoming flows and drains via outflows governed by structural features. The storage is initialized and updated based on inflows and outflows:
+\begin{equation}
+S = \alpha \cdot d^{\beta}
+\end{equation}
+where:
+\begin{itemize}
+  \item $S$ is the water volume stored [m$^3$],
+  \item $d$ is the pond water depth [m],
+  \item $\alpha$ and $\beta$ are user-defined shape parameters [-, -].
+\end{itemize}
+
+Depth is computed by inverting the storage-depth relationship:
+\begin{equation}
+d = \left( \frac{S^2}{\alpha(S+0.1)} \right)^{1/\beta}
+\end{equation}
+
+Hydraulic head and surface area are given by:
+\begin{equation}
+H = d + z_b
+\end{equation}
+\begin{equation}
+A = \alpha \cdot \beta \cdot d^{\beta-1}
+\end{equation}
+where:
+\begin{itemize}
+  \item $H$ is hydraulic head [m],
+  \item $z_b$ is pond bottom elevation [m],
+  \item $A$ is pond surface area [m$^2$].
+\end{itemize}
+
+\section{V-notch Weir}
+
+The \textbf{V-notch Weir} link represents outflow through a structure with a rating curve:
+\begin{equation}
+Q = \alpha \cdot \max(H^s - z_0, 0)^{\beta}
+\end{equation}
+where:
+\begin{itemize}
+  \item $Q$ is flow rate [m$^3$/day],
+  \item $H^s$ is upstream head [m],
+  \item $z_0$ is the weir crest elevation [m],
+  \item $\alpha$ and $\beta$ are rating curve parameters.
+\end{itemize}
+
+\section{Drain Pipe}
+
+The \textbf{Drain Pipe} link simulates pressurized or submerged pipe flow using:
+\begin{equation}
+Q = 86400 \cdot 3.47 \cdot \frac{\sqrt{\max(H^s - z_0, 0)}}{\sqrt{C_h + 1}} \cdot d_p^2
+\end{equation}
+where:
+\begin{itemize}
+  \item $C_h$ is the head-loss coefficient [-],
+  \item $d_p$ is pipe diameter [m],
+  \item $z_0$ is pipe crest elevation [m].
+\end{itemize}
+
+\section{Orifice}
+
+The \textbf{Orifice} link computes flow from:
+\begin{equation}
+Q = 86400 \cdot C_d \cdot A_o \cdot \sqrt{19.6 \cdot (H^s - H^e)}
+\end{equation}
+where:
+\begin{itemize}
+  \item $C_d$ is the orifice discharge coefficient [-],
+  \item $A_o$ is the orifice area [m$^2$],
+  \item $H^s$, $H^e$ are upstream and downstream heads [m].
+\end{itemize}
+
+\section{Darcy Connector}
+
+The \textbf{Darcy Connector} models saturated flow between zones using transmissivity:
+\begin{equation}
+Q = T \cdot (H^s - \max(z_b^s, H^e))
+\end{equation}
+where:
+\begin{itemize}
+  \item $T$ is transmissivity [m$^3$/day],
+  \item $z_b^s$ is source zone bottom elevation [m],
+  \item $H^s$, $H^e$ are upstream and downstream heads [m].
+\end{itemize}
+
+\section{Wide Channel}
+
+The \textbf{Wide Channel} uses a Manning-based flow approximation:
+\begin{equation}
+Q = 86400 \cdot \frac{\sqrt{(H^s - H^e)/L}}{n} \cdot w \cdot d^{5/3}
+\end{equation}
+where:
+\begin{itemize}
+  \item $L$ is channel length [m],
+  \item $n$ is Manning’s coefficient [-],
+  \item $w$ is channel width [m],
+  \item $d = \max((d^s + d^e)/2, 0)$ is mean flow depth [m],
+  \item $H^s$, $H^e$ are upstream and downstream heads [m].
+\end{itemize}
+
+\section{Notes on Suffix Notation}
+
+In all link equations:
+\begin{itemize}
+  \item The suffix $^.s$ denotes values at the \textbf{source} (upstream) block,
+  \item The suffix $^.e$ denotes values at the \textbf{end} (downstream) block.
+\end{itemize}
+For example, $d^s$ refers to the water depth in the source block, and $H^e$ is the head in the downstream block.
+
+\chapter{Distributed Catchment and Sheet Flow Components}
+
+This chapter documents the equations and logic for the distributed catchment model and sheet flow components, including associated connectors. These components are used to represent rainfall-runoff transformation and lateral flow routing across the landscape.
+
+\section{Distributed Catchment Block}
+
+The \textbf{Distributed Catchment} block models the hydrologic response of a catchment unit receiving precipitation and losing water to evapotranspiration and other losses. The storage dynamics follow:
+\begin{equation}
+S = A \cdot d
+\end{equation}
+where:
+\begin{itemize}
+  \item $S$ is water stored in the catchment [m$^3$],
+  \item $A$ is the surface area of the catchment [m$^2$],
+  \item $d$ is the average water depth [m].
+\end{itemize}
+
+The water depth is computed from:
+\begin{equation}
+d = \frac{S}{A}
+\end{equation}
+
+The head is defined as:
+\begin{equation}
+H = z + d
+\end{equation}
+where $z$ is the average catchment elevation [m].
+
+A linear storage loss is represented by:
+\begin{equation}
+\text{Loss} = -C_{\text{loss}} \cdot S
+\end{equation}
+where $C_{\text{loss}}$ is a user-defined loss coefficient [1/day].
+
+\section{Distributed Catchment Links}
+
+\subsection*{Catchment to Catchment Link}
+
+This connector routes lateral flow between adjacent catchments using a Manning-based flow equation:
+\begin{equation}
+\Delta H = H_s - H_e
+\end{equation}
+\begin{equation}
+\Delta d =
+\begin{cases}
+  d_s - d_{ds}, & \text{if } \Delta H > 0 \\
+  d_{ds} - d_s, & \text{if } \Delta H < 0
+\end{cases}
+\end{equation}
+\begin{equation}
+d = \max(\Delta d - d_{\text{dep}}, 0)
+\end{equation}
+\begin{equation}
+S = \frac{\Delta H}{L}
+\end{equation}
+\begin{equation}
+Q = 86400 \cdot \left(\frac{W}{n}\right) \cdot \sqrt{S} \cdot d^{5/3}
+\end{equation}
+where:
+\begin{itemize}
+  \item $Q$ is the flow rate [m$^3$/day],
+  \item $W$ is the flow width [m],
+  \item $n$ is Manning’s roughness coefficient [-],
+  \item $S$ is the hydraulic gradient [-],
+  \item $d$ is the effective flow depth [m],
+  \item $L$ is the centroid-to-centroid length [m],
+  \item $d_{\text{dep}}$ is depression storage depth [m],
+  \item $H_s$, $H_e$ are heads at source and receiving catchments [m].
+\end{itemize}
+
+\subsection*{Catchment to Fixed Head or Stream}
+
+Similar logic is used, except downstream head is fixed or determined externally:
+\begin{equation}
+\Delta H = H_s - H_e
+\end{equation}
+\begin{equation}
+d = \max(d_s - d_{\text{dep}}, 0)
+\end{equation}
+\begin{equation}
+S = \frac{\Delta H}{L}
+\end{equation}
+\begin{equation}
+Q = 86400 \cdot \left(\frac{W}{n}\right) \cdot \sqrt{S} \cdot d^{5/3}
+\end{equation}
+
+\section{Sheet Flow Block}
+
+The \textbf{Sheet Flow} block models overland flow routing across hillslopes or impervious surfaces. Its water balance is given by:
+\begin{equation}
+S = A \cdot d
+\end{equation}
+where:
+\begin{itemize}
+  \item $A$ is surface area [m$^2$],
+  \item $d$ is average water depth [m].
+\end{itemize}
+
+Head and depth are computed as:
+\begin{equation}
+H = z + d
+\end{equation}
+\begin{equation}
+d = \frac{S}{A}
+\end{equation}
+
+The loss from storage is:
+\begin{equation}
+\text{Loss} = -C_{\text{loss}} \cdot \text{S}
+\end{equation}
+
+\section{Sheet Flow Connector}
+
+This connector represents flow from a sheet flow surface:
+\begin{equation}
+\Delta d = \max(d - d_{\text{dep}}, 0)
+\end{equation}
+\begin{equation}
+Q = 86400 \cdot \left(\frac{W}{n}\right) \cdot S^{0.5} \cdot (\Delta d)^{1 + e}
+\end{equation}
+where:
+\begin{itemize}
+  \item $S$ is slope [-],
+  \item $e$ is a user-defined exponent [-],
+  \item other terms as previously defined.
+\end{itemize}
+
+\chapter{Sewer System Components}
+
+This chapter describes the sewer infrastructure components within the OpenHydroQual framework, which represent conveyance elements such as sewer pipes, manholes, and catch basins. These components allow users to simulate hydrodynamics within sewer networks using physically-based formulations.
+
+\section{Sewer Channel Segment}
+
+The \texttt{Sewerchannelsegment} block represents a cylindrical sewer channel segment with storage dynamics governed by a depth-area relationship. The total storage is defined as:
+\begin{equation}
+S = L \cdot D^2 \cdot \left(-0.9103 \left(\frac{d}{D}\right)^3 + 1.3760 \left(\frac{d}{D}\right)^2 + 0.3197 \left(\frac{d}{D}\right)\right)
+\end{equation}
+where:
+\begin{itemize}
+\item $S$: Storage (m$^3$)
+\item $L$: Length of the pipe (m)
+\item $D$: Diameter of the pipe (m)
+\item $d$: Water depth in the pipe (m)
+\end{itemize}
+
+The normalized area and depth are calculated as:
+\begin{align}
+A_n &= \frac{S}{L \cdot D^2} \\
+\hat{d} &= \min(2.2299 A_n^3 - 2.7111 A_n^2 + 2.0270 A_n, 1)
+\end{align}
+
+Then the water depth is computed as:
+\begin{equation}
+d = \hat{d} \cdot D
+\end{equation}
+
+The cross-sectional area of flow is given by:
+\begin{equation}
+A = D^2 \cdot \left(-0.9103 \left(\frac{d}{D}\right)^3 + 1.3760 \left(\frac{d}{D}\right)^2 + 0.3197 \left(\frac{d}{D}\right)\right)
+\end{equation}
+
+This function approximates the flow area of a partially filled circular pipe.
+
+The hydraulic head is:
+\begin{equation}
+H = d + z_b + 10000 \cdot \max(0, S - 0.7854 L D^2)
+\end{equation}
+where $z_b$ is the bottom elevation.
+
+\section{Sewer Pipe Connector}
+
+The \textit{Sewer pipe} link connects two sewer segments and calculates flow using Manning’s equation:
+\begin{equation}
+Q = 86400 \cdot \left(\frac{\sqrt{\Delta H / L}}{n}\right) \cdot A_{\text{eff}} \cdot R^{2/3}
+\end{equation}
+where:
+\begin{itemize}
+\item $\Delta H$: Difference in hydraulic head between start and end (m)
+\item $L$: Pipe length (m)
+\item $n$: Manning's roughness coefficient
+\item $A_{\text{eff}}$: Effective flow area (m$^2$)
+\item $R$: Hydraulic radius (m)
+\end{itemize}
+
+The effective area $A_{\text{eff}}$ is defined based on the direction of the head gradient:
+\begin{equation}
+A_{\text{eff}} = \texttt{hsd}(\Delta H) \cdot A_1 + \texttt{hsd}(-\Delta H) \cdot A_2
+\end{equation}
+where $A_1$ and $A_2$ are the cross-sectional areas at the start and end of the link, respectively.
+
+\section{Catch Basin}
+
+The \texit{Catch basin} block stores water using a simplified depth-area relation:
+\begin{equation}
+d = \frac{S}{A_b}
+\end{equation}
+\begin{equation}
+H = d + z_b
+\end{equation}
+where:
+\begin{itemize}
+\item $A_b$: Base area of the catch basin (m$^2$)
+\item $z_b$: Bottom elevation (m)
+\end{itemize}
+
+\FloatBarrier
+\section{Sewer Pipe Link}
+
+The \texttt{Sewer Pipe} link represents hydraulic connection between two sewer blocks using Manning’s equation:
+\begin{equation}
+Q = 86400 \cdot \frac{\sqrt{\Delta H / L}}{n} \cdot A_{eff} \cdot R^{2/3}
+\end{equation}
+where:
+\begin{itemize}
+\item $\Delta H$ = difference in head between upstream and downstream \textnormal{[m]}
+\item $L$ = pipe length \textnormal{[m]}
+\item $n$ = Manning coefficient
+\item $A_{eff}$ = effective cross-sectional area \textnormal{[m\textsuperscript{2}]}
+\item $R$ = hydraulic radius \textnormal{[m]}
+\end{itemize}
+The effective area and radius are determined based on the direction of flow.
+
+\section{Sewer-to-Sewer and Sewer-to-Boundary Links}
+
+\subsection{Sewer-to-Sewer Link}
+Connects two sewer channel segments. Hydraulic properties are averaged:
+\begin{equation}
+Q = 86400 \cdot \frac{\sqrt{\Delta H / L}}{n} \cdot A \cdot R^{2/3}
+\end{equation}
+with $A$, $R$, and $n$ taken as averages of upstream and downstream values.
+
+\subsection{Sewer-to-Fixed Head Link}
+Represents outlet to a fixed hydraulic head. Similar Manning formula applies:
+\begin{equation}
+Q = 86400 \cdot \frac{\sqrt{\Delta H / L}}{n} \cdot A \cdot R^{2/3}
+\end{equation}
+
+\subsection{Sewer-to-Pond Link}
+Uses head-dependent bifurcated flow representation:
+\begin{equation}
+Q = 86400 \cdot \frac{\sqrt{\Delta H}}{n} \cdot \left[ \text{sgn}(\Delta H) \cdot A \cdot R^{2/3} \right]_{up/down}
+\end{equation}
+where upstream and downstream components are selected based on head difference.
+
+\section{Soil-to-Sewer Link}
+
+This link simulates seepage into sewer segments using a transmissivity-based formula:
+\begin{equation}
+Q = K_T \cdot \Delta H \cdot \pi D L
+\end{equation}
+where:
+\begin{itemize}
+\item $K_T$ = transmissivity coefficient \textnormal{[1/day]}
+\item $\Delta H$ = head difference between soil and sewer \textnormal{[m]}
+\item $D$ = sewer diameter \textnormal{[m]}
+\item $L$ = sewer length \textnormal{[m]}
+\end{itemize}
+
+These components enable simulation of urban drainage systems in OpenHydroQual, capturing pressurized and open channel conditions.
+
+\chapter{Stormwater Control Measures}
+
+This chapter describes the stormwater pond unit and its associated hydraulic structures, including rating-curve-based weirs, drain pipes, wide channels, and aggregate zones. These components allow modeling of pond dynamics, outflows, and interactions with other hydrologic blocks.
+
+\section{Stormwater Pond}
+
+The \textbf{Stormwater Pond} block represents a detention or retention pond that stores incoming flows and drains via outflows governed by structural features. The storage is initialized and updated based on inflows and outflows:
+\begin{equation}
+\text{Storage} = \alpha \cdot d^{\beta}
+\end{equation}
+where:
+\begin{itemize}
+\item $\text{Storage}$ is the water volume stored [m$^3$],
+\item $d$ is the pond water depth [m],
+\item $\alpha$ and $\beta$ are user-defined shape parameters [-, -].
+\end{itemize}
+
+Depth is computed by inverting the storage-depth relationship:
+\begin{equation}
+d = \left( \frac{\text{Storage}^2}{\alpha(\text{Storage}+0.1)} \right)^{1/\beta}
+\end{equation}
+
+Hydraulic head and surface area are given by:
+\begin{equation}
+H = d + z_b
+\end{equation}
+\begin{equation}
+A = \alpha \cdot \beta \cdot d^{\beta-1}
+\end{equation}
+where:
+\begin{itemize}
+\item $H$ is hydraulic head [m],
+\item $z_b$ is pond bottom elevation [m],
+\item $A$ is pond surface area [m$^2$].
+\end{itemize}
+
+\section{V-notch Weir}
+
+The \textbf{V-notch Weir} link represents outflow through a structure with a rating curve:
+\begin{equation}
+Q = \alpha \cdot \max(H_s - z_0, 0)^{\beta}
+\end{equation}
+where:
+\begin{itemize}
+\item $Q$ is flow rate [m$^3$/day],
+\item $H_s$ is upstream head [m],
+\item $z_0$ is the weir crest elevation [m],
+\item $\alpha$ and $\beta$ are rating curve parameters.
+\end{itemize}
+
+\section{Drain Pipe}
+
+The \textbf{Drain Pipe} link simulates pressurized or submerged pipe flow using:
+\begin{equation}
+Q = 86400 \cdot 3.47 \cdot \frac{\sqrt{\max(H_s - z_0, 0)}}{\sqrt{C_h + 1}} \cdot d_p^2
+\end{equation}
+where:
+\begin{itemize}
+\item $C_h$ is the head-loss coefficient [-],
+\item $d_p$ is pipe diameter [m].
+\end{itemize}
+
+\section{Wide Channel}
+
+The \textbf{Wide Channel} uses a Manning-based flow approximation:
+\begin{equation}
+Q = 86400 \cdot \frac{\sqrt{\Delta H/L}}{n} \cdot w \cdot d^{5/3}
+\end{equation}
+where:
+\begin{itemize}
+\item $\Delta H = H_s - H_e$ is the head difference [m],
+\item $L$ is channel length [m],
+\item $n$ is Manning’s coefficient [-],
+\item $w$ is channel width [m],
+\item $d = \max((d^s + d^e)/2, 0)$ is mean flow depth [m].
+\end{itemize}
+
+\section{Aggregate Storage Layer}
+
+The \textbf{Aggregate Storage Layer} block simulates water storage in a porous aggregate zone. Storage is determined as:
+\begin{equation}
+d = \frac{S}{A \cdot \phi}
+\end{equation}
+\begin{equation}
+H = d + z_b
+\end{equation}
+where:
+\begin{itemize}
+\item $d$ is the water depth [m],
+\item $S$ is the storage volume [m$^3$],
+\item $A$ is the base area [m$^2$],
+\item $\phi$ is the porosity [-],
+\item $z_b$ is bottom elevation [m],
+\item $H$ is the hydraulic head [m].
+\end{itemize}
+
+\section{Notes on Suffix Notation}
+
+In all link equations:
+\begin{itemize}
+\item The suffix $^.s$ denotes values at the \textbf{source} (upstream) block,
+\item The suffix $^.e$ denotes values at the \textbf{end} (downstream) block,
+\item Differences such as $\Delta H = H_s - H_e$ are used for clarity.
+\end{itemize}
+
+\chapter{Unconfined Groundwater Flow Components}
+
+This chapter documents the components used to simulate unconfined aquifer dynamics and their interactions with wells, surface water, and fixed heads in OpenHydroQual.
+
+\section{Unconfined Aquifer Cell}
+
+The \textbf{Unconfined Aquifer Cell} block simulates water storage in an unconfined groundwater system. The governing storage is:
+\begin{equation}
+S = A \cdot d \cdot S_y
+\end{equation}
+where:
+\begin{itemize}
+\item $S$: Storage [m$^3$],
+\item $A$: Cell area [m$^2$],
+\item $d = h - z_b$: Depth to groundwater [m],
+\item $S_y$: Specific yield [-],
+\item $h$: Piezometric head [m],
+\item $z_b$: Base elevation [m].
+\end{itemize}
+
+Recharge is computed as:
+\begin{equation}
+R = r_a \cdot A
+\end{equation}
+where $r_a$ is recharge rate per unit area [m/day].
+
+Piezometric head is calculated from storage:
+\begin{equation}
+h = \frac{S}{S_y A} + z_b
+\end{equation}
+
+\section{Unconfined Aquifer Link}
+
+The \textbf{Unconfined Aquifer link} simulates lateral saturated flow between two Unconfined Aquifer Cells. The flow is:
+\begin{equation}
+Q = K_{avg} \cdot \frac{\Delta h}{L} \cdot w \cdot \bar{d}
+\end{equation}
+where:
+\begin{itemize}
+\item $K_{avg} = 0.5(K_1 + K_2)$ is average hydraulic conductivity [m/day],
+\item $\Delta h = h^s - h^e$ is the head difference [m],
+\item $L$: distance between centroids [m],
+\item $w$: interface width [m],
+\item $\bar{d}$: mean saturated depth $= 0.5(d^s + d^e)$ [m].
+\end{itemize}
+
+Darcy flux is:
+\begin{equation}
+q = \frac{K_{avg} \cdot \Delta h}{L}
+\end{equation}
+
+\section{Unconfined Groundwater to Fixed Head}
+
+This \textbf{Unconfined Groundwater to fixed head} link simulates exchange with a fixed-head boundary:
+\begin{equation}
+Q = K \cdot \frac{h - H_{fix}}{L} \cdot w \cdot d
+\end{equation}
+where $H_{fix}$ is the fixed head value [m].
+
+\section{Surface Water to Unconfined Groundwater Link}
+
+The \textbf{Surface water to unconfined groundwater link} simulates vertical seepage using:
+\begin{equation}
+Q = A_i \cdot K \cdot \frac{H_s - h}{L}
+\end{equation}
+where:
+\begin{itemize}
+\item $A_i$: Interface area [m$^2$],
+\item $H_s$: Surface water head [m],
+\item $h$: groundwater head [m],
+\item $K$: hydraulic conductivity [m/day],
+\item $L$: vertical separation [m].
+\end{itemize}
+
+\section{Water Supply Well}
+
+The \textbf{Water Supply Well} block represents a pumping well:
+\begin{equation}
+S = 0.25 \pi d^2 \cdot D
+\end{equation}
+\begin{equation}
+H = z_b + D
+\end{equation}
+\begin{equation}
+D = \frac{4S}{\pi d^2}
+\end{equation}
+where:
+\begin{itemize}
+\item $d$: well diameter [m],
+\item $D$: water depth [m],
+\item $z_b$: bottom elevation of the well [m].
+\end{itemize}
+
+\section{Unconfined Aquifer to Well (Fixed Withdrawal)}
+
+This link simulates withdrawal at a fixed rate:
+\begin{equation}
+Q = Q_p \cdot \frac{\max(h - z_b^w, 0)}{0.1 + \max(h - z_b^w, 0)}
+\end{equation}
+where $z_b^w$ is the well bottom elevation [m].
+
+\section{Unconfined Aquifer to Well (Pumped)}
+
+This version simulates flow based on drawdown and well geometry:
+\begin{equation}
+Q = \pi \cdot (d^s + d^e) \cdot \frac{h - H_w}{\ln(A / d_w^2)}
+\end{equation}
+where:
+\begin{itemize}
+\item $H_w$: well head [m],
+\item $d_w$: well diameter [m],
+\item $d^e$: water depth in the well [m]
+\item $A$: contributing area [m$^2$].
+\end{itemize}
+
+\FloatBarrier
+
+\chapter{Well and Well-Soil Interaction Components}
+
+This chapter describes components and connectors associated with wells, including both standard wells and wells filled with aggregates, and their interactions with adjacent soil or surface water components. These components model hydrologic behaviors relevant to infiltration systems, monitoring wells, and other vertical flow control structures.
+
+\section{Well}
+The \textbf{Well} block represents a vertical water storage unit with cylindrical geometry. The volume of water stored is calculated as:
+\begin{equation}
+S = \frac{\pi}{4} D^2 d
+\end{equation}
+where:
+\begin{itemize}
+\item $S$: Storage [m$^3$],
+\item $D$: well diameter [m],
+\item $d$: water depth in the well [m].
+\end{itemize}
+
+The hydraulic head in the well is calculated by:
+\begin{equation}
+h = d + z_b
+\end{equation}
+where $z_b$ is the bottom elevation of the well [m].
+
+\section{Well-Filled with Aggregates}
+The \textbf{Well-filled with aggregates} block behaves similarly to the standard well, but accounts for porosity of the fill material:
+\begin{equation}
+S = \frac{\pi}{4} D^2 d \cdot \phi
+\end{equation}
+where $\phi$ is the porosity.
+
+Depth and head are computed in the same way, using the adjusted volume.
+
+\section{Horizontal Link from Well to Soil}
+The \textbf{Horizontal link from well to soil} models lateral exchange between a well and surrounding soil. The flow is calculated as:
+\begin{equation}
+Q = K_{sat,e} \left[ \frac{\Delta h}{L} \cdot A - \frac{h_{p,e}}{L} A_r \right] \cdot \frac{d_s}{d_s + 0.01}
+\end{equation}
+where:
+\begin{itemize}
+\item $Q$: flow rate [m$^3$/d],
+\item $K_{sat,e}$: saturated hydraulic conductivity of receiving soil [m/d],
+\item $\Delta h$: head difference between well and soil [m],
+\item $L$: length of the connection [m],
+\item $A$: active interface area [m$^2$],
+\item $A_r$: reverse flow interface area [m$^2$],
+\item $h_{p,e}$: pressure head in soil,
+\item $d_s$: water depth in the well.
+\end{itemize}
+
+The interface area is conditionally defined based on flow direction.
+
+\section{Vertical Link from Well to Soil}
+The \textbf{Vertical link from well to soil} enables vertical infiltration or exfiltration with flow defined as:
+\begin{equation}
+Q = K_{sat,e} \cdot \frac{\Delta h}{L} \cdot A \cdot \frac{d_s}{d_s + 0.01}
+\end{equation}
+with $A$ being the cross-sectional area of the well and $L = \frac{d_e}{2}$.
+
+\section{Surface Water to Well Link}
+The \textbf{Surface water to well} link simulates open-channel inflow from a surface source into the well using a Manning-like formula:
+\begin{equation}
+Q = 86400 \cdot \left( \frac{\sqrt{\Delta h / L}}{n} \right) \cdot \pi D d_s^{5/3}
+\end{equation}
+where $n$ is the Manning roughness coefficient and $D$ is the diameter of the well.
+
+This set of components supports a range of infiltration and monitoring configurations common in stormwater and groundwater systems.
+
+\chapter{Open Surface Evaporation Modules}
+
+OpenHydroQual includes several evaporation models that simulate water loss from open surfaces, such as ponds, reservoirs, and impervious surfaces. These modules differ from soil-based evapotranspiration in that they do not account for limitations due to soil moisture availability. The evaporation rate is expressed in units of m/day and is converted to volumetric rate (m³/day) by multiplying with an effective wetted area.
+
+\section{Aerodynamic Evaporation (Open Surface)}
+
+The aerodynamic method computes evaporation as a function of wind speed and vapor pressure deficit using the following equation:
+\begin{equation}
+E_{\text{aero}} = C B e_{\text{as}} (R_h - 1)
+\end{equation}
+where:
+\begin{itemize}
+\item $E_{\text{aero}}$: evaporation rate [m/day]
+\item $C$: empirical correction coefficient (user-defined)
+\item $B = \frac{0.000102 \cdot u}{\left[\ln(z_2/z_0)\right]^2}$: aerodynamic transfer coefficient
+\item $e_{\text{as}} = 611 \cdot \exp\left(\frac{17.27 T}{237.3 + T}\right)$: saturation vapor pressure [Pa]
+\item $u$: wind speed [m/s] at height $z_2$ [m]
+\item $z_0$: surface roughness length [m]
+\item $T$: air temperature [°C]
+\item $R_h$: relative humidity (0 to 1)
+\end{itemize}
+
+\section{Energy Balance Method (Open Surface)}
+
+This method uses solar radiation and temperature to estimate evaporation:
+\begin{equation}
+E_{\text{rad}} = -\frac{C \cdot R_s}{l_v \cdot 1000} \cdot 86400
+\end{equation}
+where:
+\begin{itemize}
+\item $E_{\text{rad}}$: evaporation rate [m/day]
+\item $C$: correction coefficient
+\item $R_s$: solar radiation [W/m²]
+\item $l_v = 2501000 - 2370 T$: latent heat of vaporization [J/kg]
+\end{itemize}
+
+\section{Penman Combination Method (Open Surface)}
+
+The Penman method combines both aerodynamic and radiation-based evaporation:
+\begin{equation}
+E_{\text{pen}} = \frac{\Delta \cdot E_r + \gamma \cdot E_a}{\Delta + \gamma}
+\end{equation}
+where:
+\begin{itemize}
+\item $E_{\text{pen}}$: evaporation rate [m/day]
+\item $E_r$: radiation component as defined above
+\item $E_a$: aerodynamic component as defined above
+\item $\Delta = \frac{4098 e_{\text{as}}}{(237.3 + T)^2}$: slope of vapor pressure curve [Pa/°C]
+\item $\gamma$: psychrometric constant [Pa/°C]
+\end{itemize}
+
+\section{Time Series-Based Evaporation (Open Surface)}
+
+This module applies a time series of evaporation rates (m/day) scaled by a coefficient:
+\begin{equation}
+E_{\text{ts}} = C \cdot E_{\text{input}}
+\end{equation}
+where:
+\begin{itemize}
+\item $E_{\text{ts}}$: evaporation rate [m/day]
+\item $E_{\text{input}}$: input time series [m/day]
+\item $C$: correction factor (dimensionless)
+\end{itemize}
+
+The volumetric rate of evaporation (in $\text{m}^3/\text{day}$) for each module is obtained as:
+\begin{equation}
+Q_{\text{evap}} = A_{\text{eff}} \cdot E
+\end{equation}
+where:
+\begin{itemize}
+\item $Q_{\text{evap}}$: total evaporation volume rate [m³/day]
+\item $A_{\text{eff}} = A \cdot \frac{d}{d+0.001}$: effective surface area [m²]
+\item $d$: water depth [m]
+\end{itemize}
+
+\chapter{Activated Sludge Reactor and Settling Compartment}
+
+\section{Overview}
+This plugin includes components for modeling an activated sludge treatment process, including a generic reactor block and a settling compartment. The components represent simplified hydraulic behavior without incorporating reaction kinetics or sludge recirculation mechanisms. These elements are primarily intended for use in custom or hybrid water quality models.
+
+\section{Reactor}
+The \textbf{Reactor} block represents a completely mixed volume where water and constituents are stored. It includes a single state variable representing volumetric storage:
+
+\begin{itemize}
+\item \textbf{Storage} ($S$, m$^3$): The volume of water in the reactor. It is a balance variable that responds to inflows and outflows.
+\end{itemize}
+
+\section{Settling Compartment}
+The \textbf{Settling compartment} block is used to represent a sedimentation tank or clarifier. It is also modeled as a storage element with optional inflow:
+
+\begin{itemize}
+\item \textbf{Storage} ($S$, m$^3$): Water volume in the settling compartment.
+\item \textbf{Inflow} ($Q_{in}$, m$^3$/day): Time-series inflow to the compartment.
+\item \textbf{Bottom elevation} ($z_b$, m): Elevation of the compartment floor.
+\end{itemize}
+
+\section{Links}
+\subsection{Fixed Flow}
+The \textbf{Fixed flow} link transfers a user-defined, constant flow rate between components:
+\begin{itemize}
+\item \textbf{Flow rate} ($Q$, m$^3$/day): Set by the user.
+\end{itemize}
+
+\subsection{Settling Element Interface}
+The \textbf{Settling element interface} link allows both a constant and a time-variable flow across a defined interface:
+\begin{itemize}
+\item \textbf{Time-variable flow} ($Q_t$, m$^3$/day): Flow based on a time series.
+\item \textbf{Constant flow} ($Q_c$, m$^3$/day): User-specified constant flow.
+\item \textbf{Total flow} ($Q$, m$^3$/day): $Q = Q_t + Q_c$
+\item \textbf{Interface area} ($A$, m$^2$): The physical area of connection between elements.
+\end{itemize}
+
+These blocks and links form the basis for representing hydraulic behavior in biological treatment systems. It is mainly to represent the interface between the upper and lower layers of a clarifier by allowing solids with a given settling velocity to settle through the interface. For dynamic process modeling (e.g., ASM1), additional components or user-defined kinetics are required.
+
+\bibliography{references.bib}
+
+
+\end{document}
