@@ -21,8 +21,10 @@ jobs:
         pdflatex -output-directory=docs main.tex
         pdflatex -output-directory=docs main.tex  # run twice for references
 
-    - name: Upload artifact (optional)
-      uses: actions/upload-artifact@v3
-      with:
-        name: compiled-pdf
-        path: docs/main.pdf
+    - name: Commit and push compiled PDF
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git add docs/main.pdf
+        git commit -m "Auto-compile and update PDF" || echo "No changes to commit"
+        git push
