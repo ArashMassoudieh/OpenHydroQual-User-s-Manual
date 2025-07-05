@@ -12,34 +12,14 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install LaTeX
+    - name: Install LaTeX and latexmk
       run: |
         sudo apt-get update
         sudo apt-get install -y texlive-full latexmk
 
-    - name: Compile main.tex with latexmk
+    - name: Compile LaTeX document
       run: |
         mkdir -p docs
         latexmk -pdf -output-directory=docs main.tex
-        ls -lh docs/
-
-    - name: Verify main.pdf exists
-      run: |
-        if [ ! -f docs/main.pdf ]; then
-          echo "PDF build failed — docs/main.pdf not found."
-          exit 1
-        else
-          echo "PDF generated successfully:"
-          ls -lh docs/main.pdf
-        fi
 
     - name: Commit and push compiled PDF
-      env:
-        TOKEN: ${{ secrets.GH_PAT }}
-      run: |
-        git config --global user.name "GitHub Actions"
-        git config --global user.email "actions@github.com"
-        git remote set-url origin https://x-access-token:${TOKEN}@github.com/${{ github.repository }}
-        git add docs/main.pdf
-        git commit -m "Auto-compile and update PDF" || echo "No changes to commit"
-        git push
